@@ -315,7 +315,7 @@ export default function App() {
               <BarChart3 size={28} />
             </div>
             <div>
-              <h1 className="text-xl font-bold tracking-tight">Ad Report Intelligence</h1>
+              <h1 className="text-xl font-bold tracking-tight">広告レポートコメント自動生成</h1>
               <p className="text-xs text-slate-400 font-medium">mi-rai.co.jp Exclusive Authorized</p>
             </div>
           </div>
