@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   Loader2,
   FileText,
@@ -20,7 +20,8 @@ import {
   User,
   Target,
   MessageSquare,
-  ListTodo
+  ListTodo,
+  X
 } from 'lucide-react';
 import { GoogleLogin, googleLogout } from '@react-oauth/google';
 import { jwtDecode } from 'jwt-decode';
@@ -49,6 +50,10 @@ export default function App() {
     issues: '',
     tasks: ''
   });
+  const [showModal, setShowModal] = useState(false);
+  const [modalTitle, setModalTitle] = useState('');
+  const [modalMessage, setModalMessage] = useState('');
+  const fileInputRef = useRef(null);
 
   // Load SheetJS dynamically
   useEffect(() => {
@@ -154,6 +159,17 @@ export default function App() {
     return label;
   };
 
+  const handleReset = () => {
+    setFile(null);
+    setWorkbook(null);
+    setActiveSheet('');
+    setSheetData([]);
+    setExtractedData(null);
+    setExtractionLog([]);
+    setShowModal(false);
+    if (fileInputRef.current) fileInputRef.current.value = "";
+  };
+
   const findValueByLabel = (wb, sheetName, label, direction = 'bottom') => {
     const XLSX = window.XLSX;
     const targetName = wb.SheetNames.find(n => n.trim().includes(sheetName)) || sheetName;
@@ -215,7 +231,7 @@ export default function App() {
         c: getCellValue(wb, mainSheet, `Z${r}`)
       })).filter(i => i.n && i.c && i.c !== '0');
 
-      setExtractedData({
+      const extracted = {
         achievement: fetchVal(mainSheet, 'E8', '目標達成率'),
         totalCV: fetchVal(mainSheet, 'R8', 'コンバージョン数'),
         cvr: fetchVal(mainSheet, 'AF8', 'コンバージョン率'),
@@ -223,10 +239,26 @@ export default function App() {
         ctr: fetchVal(mainSheet, 'AF19', 'クリック率'),
         goal: fetchVal(mainSheet, 'BH38', '目標値'),
         cvBreakdown: cvItems.map(i => `${i.n}${i.c}件`).join('・')
-      });
+      };
+
       setExtractionLog(logs);
-      setStatus({ type: 'success', message: '解析完了' });
+
+      // Check if essential data is missing (unsaved file detection)
+      const essentials = [extracted.achievement, extracted.totalCV, extracted.cpa];
+      const missingCount = essentials.filter(v => !v || v === "0" || v === "0%").length;
+
+      if (missingCount >= 2) {
+        setExtractedData(null); // Clear data to prevent generation
+        setModalTitle('データの読み取り失敗');
+        setModalMessage('エクセルファイルから数値を読み取ることができませんでした。システムからダウンロードした直後のファイルは計算結果が保持されていない場合があります。一度「上書き保存」してから、再度ファイルを選択してください。');
+        setShowModal(true);
+        setStatus({ type: 'error', message: '解析エラー' });
+      } else {
+        setExtractedData(extracted);
+        setStatus({ type: 'success', message: '解析完了' });
+      }
     } catch (err) {
+      console.error(err);
       setStatus({ type: 'error', message: 'ファイル読み込み失敗' });
     }
   };
@@ -420,12 +452,18 @@ export default function App() {
                   </h2>
                 </div>
                 <div className="relative group">
-                  <input type="file" accept=".xlsx" onChange={handleFileChange} className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10" />
+                  <input type="file" ref={fileInputRef} accept=".xlsx" onChange={handleFileChange} className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10" />
                   <div className="border-2 border-dashed border-slate-200 group-hover:border-indigo-400 group-hover:bg-indigo-50/50 rounded-3xl p-12 transition-all text-center">
                     <FileText className="mx-auto text-slate-300 group-hover:text-indigo-500 mb-4 transition-colors" size={48} />
                     <p className="text-sm font-bold text-slate-600">{file ? file.name : "Excelレポートを選択"}</p>
                     <p className="text-xs text-slate-400 mt-2">.xlsx形式のみ対応</p>
                   </div>
+                </div>
+                <div className="mt-4 p-4 bg-amber-50 rounded-2xl border border-amber-100 flex items-start gap-3">
+                  <AlertCircle size={18} className="text-amber-500 shrink-0 mt-0.5" />
+                  <p className="text-[11px] text-amber-700 leading-relaxed">
+                    <strong>注意：</strong> エクセルファイルをダウンロード後、一度も「保存（上書き保存）」せずに読み込むと、値が正しく表示されない場合があります。値が取得できない場合は、ファイルを一度保存してから再度選択してください。
+                  </p>
                 </div>
               </section>
 
@@ -640,6 +678,37 @@ export default function App() {
           </div>
         )}
       </div>
+
+      {/* Error Modal */}
+      {showModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-in fade-in duration-200">
+          <div className="bg-white rounded-[2.5rem] shadow-2xl border border-slate-200 max-w-md w-full overflow-hidden animate-in zoom-in-95 duration-200">
+            <div className="p-8 text-center space-y-6">
+              <div className="w-20 h-20 bg-rose-50 rounded-3xl flex items-center justify-center mx-auto text-rose-500">
+                <AlertCircle size={40} />
+              </div>
+              <div className="space-y-2">
+                <h3 className="text-xl font-black text-slate-800">{modalTitle}</h3>
+                <p className="text-sm text-slate-500 leading-relaxed">
+                  {modalMessage}
+                </p>
+              </div>
+              <button
+                onClick={handleReset}
+                className="w-full py-4 bg-slate-900 text-white font-bold rounded-2xl hover:bg-slate-800 transition-all active:scale-95 shadow-lg shadow-slate-200"
+              >
+                了解しました
+              </button>
+            </div>
+            <button
+              onClick={handleReset}
+              className="absolute top-6 right-6 p-2 text-slate-300 hover:text-slate-500 transition-colors"
+            >
+              <X size={20} />
+            </button>
+          </div>
+        </div>
+      )}
 
       <style dangerouslySetInnerHTML={{ __html: `
         .custom-scrollbar::-webkit-scrollbar { width: 4px; height: 4px; }
