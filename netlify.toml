@@ -9,4 +9,3 @@
 
 [functions]
   directory = "netlify/functions"
-  node_runtime = "nodejs20.x"
