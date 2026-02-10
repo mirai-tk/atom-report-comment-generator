@@ -234,7 +234,7 @@ export default function App() {
   const callGemini = async (prompt) => {
     if (!apiKey) throw new Error("APIキーが設定されていません。ログインしてください。");
 
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`;
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
     const delays = [1000, 2000, 4000, 8000, 16000];
 
     for (let i = 0; i <= delays.length; i++) {
