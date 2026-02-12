@@ -21,10 +21,16 @@ import {
   Target,
   MessageSquare,
   ListTodo,
-  X
+  X,
+  Building,
+  Users,
+  Plus,
+  Trash2,
+  Save
 } from 'lucide-react';
 import { GoogleLogin, googleLogout } from '@react-oauth/google';
 import { jwtDecode } from 'jwt-decode';
+import { supabase } from './lib/supabase';
 
 const appId = typeof __app_id !== 'undefined' ? __app_id : 'excel-ai-reporter';
 
@@ -53,6 +59,15 @@ export default function App() {
   const [showModal, setShowModal] = useState(false);
   const [modalTitle, setModalTitle] = useState('');
   const [modalMessage, setModalMessage] = useState('');
+  const [showPresetsModal, setShowPresetsModal] = useState(false);
+  const [selectedCustomerId, setSelectedCustomerId] = useState('');
+  const [selectedPresetId, setSelectedPresetId] = useState('');
+  const [customers, setCustomers] = useState([]);
+  const [presets, setPresets] = useState([]);
+  const [editingCustomer, setEditingCustomer] = useState(null);
+  const [editingPreset, setEditingPreset] = useState(null);
+  const [managementCustomer, setManagementCustomer] = useState(''); // Selected customer for management
+  const [confirmModal, setConfirmModal] = useState({ show: false, title: '', message: '', onConfirm: null });
   const fileInputRef = useRef(null);
 
   // Load SheetJS dynamically
@@ -85,6 +100,25 @@ export default function App() {
     return () => { if (document.head.contains(script)) document.head.removeChild(script); };
   }, []);
 
+  const fetchData = useCallback(async () => {
+    if (!user || !import.meta.env.VITE_SUPABASE_URL || import.meta.env.VITE_SUPABASE_URL === 'your-project-url.supabase.co') return;
+    try {
+      const { data: cData, error: cError } = await supabase.from('customers').select('*').order('created_at', { ascending: true });
+      if (cError) throw cError;
+      setCustomers(cData || []);
+
+      const { data: pData, error: pError } = await supabase.from('presets').select('*').order('created_at', { ascending: true });
+      if (pError) throw pError;
+      setPresets(pData || []);
+    } catch (e) {
+      console.error('Supabase fetch error:', e);
+    }
+  }, [user]);
+
+  useEffect(() => {
+    fetchData();
+  }, [fetchData]);
+
   const handleLoginSuccess = async (credentialResponse) => {
     try {
       const decoded = jwtDecode(credentialResponse.credential);
@@ -98,6 +132,17 @@ export default function App() {
       setUser(decoded);
       localStorage.setItem(`user_${appId}`, JSON.stringify(decoded));
       setStatus({ type: 'success', message: 'ログインしました' });
+
+      // Sign into Supabase with the same Google Token
+      try {
+        await supabase.auth.signInWithIdToken({
+          provider: 'google',
+          token: credentialResponse.credential,
+        });
+      } catch (e) {
+        console.warn('Supabase Auth link failed:', e);
+        // We continue anyway, RLS will fail if not properly configured on DB side
+      }
 
       // Fetch API Key from Netlify function
       setStatus({ type: 'info', message: 'APIキーを取得中...' });
@@ -159,6 +204,14 @@ export default function App() {
     return label;
   };
 
+  // Auto-hide success status
+  useEffect(() => {
+    if (status && status.type === 'success') {
+      const timer = setTimeout(() => setStatus(null), 3000);
+      return () => clearTimeout(timer);
+    }
+  }, [status]);
+
   const handleReset = () => {
     setFile(null);
     setWorkbook(null);
@@ -168,6 +221,97 @@ export default function App() {
     setExtractionLog([]);
     setShowModal(false);
     if (fileInputRef.current) fileInputRef.current.value = "";
+  };
+
+  const handleSaveCustomer = async (name) => {
+    if (!name.trim() || !user) return;
+    try {
+      if (editingCustomer && editingCustomer.id !== null) {
+        const { error } = await supabase.from('customers').update({ name }).eq('id', editingCustomer.id);
+        if (error) throw error;
+      } else {
+        const { error } = await supabase.from('customers').insert([{ name }]);
+        if (error) throw error;
+      }
+      setEditingCustomer(null);
+      fetchData();
+    } catch (e) {
+      console.error('Customer save error:', e);
+      setStatus({ type: 'error', message: '顧客の保存に失敗しました' });
+    }
+  };
+
+  const handleDeleteCustomer = (id) => {
+    setConfirmModal({
+      show: true,
+      title: '顧客の削除',
+      message: 'この顧客を削除しますか？紐付くプリセットもすべて削除されます。この操作は取り消せません。',
+      onConfirm: async () => {
+        try {
+          const { error } = await supabase.from('customers').delete().eq('id', id);
+          if (error) throw error;
+          if (managementCustomer === id) setManagementCustomer('');
+          if (selectedCustomerId === id) {
+            setSelectedCustomerId('');
+            setSelectedPresetId('');
+          }
+          fetchData();
+          setStatus({ type: 'success', message: '顧客を削除しました' });
+        } catch (e) {
+          console.error('Customer delete error:', e);
+          setStatus({ type: 'error', message: '顧客の削除に失敗しました' });
+        }
+      }
+    });
+  };
+
+  const handleSavePreset = async (presetData) => {
+    if (!presetData.name.trim() || !managementCustomer || !user) return;
+    try {
+      if (editingPreset && editingPreset.id) {
+        const { error } = await supabase.from('presets').update({
+          name: presetData.name,
+          goal: presetData.goal,
+          issues: presetData.issues,
+          tasks: presetData.tasks
+        }).eq('id', editingPreset.id);
+        if (error) throw error;
+      } else {
+        const { error } = await supabase.from('presets').insert([{
+          customer_id: managementCustomer,
+          name: presetData.name,
+          goal: presetData.goal,
+          issues: presetData.issues,
+          tasks: presetData.tasks
+        }]);
+        if (error) throw error;
+      }
+      fetchData();
+      setStatus({ type: 'success', message: 'プリセットを保存しました' });
+    } catch (e) {
+      console.error('Preset save error:', e);
+      setStatus({ type: 'error', message: 'プリセットの保存に失敗しました' });
+    }
+  };
+
+  const handleDeletePreset = (id) => {
+    setConfirmModal({
+      show: true,
+      title: 'プリセットの削除',
+      message: 'このプリセットを削除しますか？この操作は取り消せません。',
+      onConfirm: async () => {
+        try {
+          const { error } = await supabase.from('presets').delete().eq('id', id);
+          if (error) throw error;
+          if (selectedPresetId === id) setSelectedPresetId('');
+          fetchData();
+          setStatus({ type: 'success', message: 'プリセットを削除しました' });
+        } catch (e) {
+          console.error('Preset delete error:', e);
+          setStatus({ type: 'error', message: 'プリセットの削除に失敗しました' });
+        }
+      }
+    });
   };
 
   const findValueByLabel = (wb, sheetName, label, direction = 'bottom') => {
@@ -352,14 +496,6 @@ export default function App() {
             </div>
           </div>
           <div className="flex items-center gap-3">
-            {status.message && (
-              <span className={`px-4 py-1.5 rounded-full text-xs font-bold border animate-in fade-in slide-in-from-right-2 ${
-                status.type === 'success' ? 'bg-emerald-50 text-emerald-600 border-emerald-100' :
-                status.type === 'error' ? 'bg-rose-50 text-rose-600 border-rose-100' : 'bg-blue-50 text-blue-600 border-blue-100'
-              }`}>
-                {status.message}
-              </span>
-            )}
 
             {/* Dev Mode Settings Toggle */}
             {(import.meta.env.DEV || user?.email === 'mirai-dev@mi-rai.co.jp') && (
@@ -375,7 +511,7 @@ export default function App() {
               <div className="flex items-center gap-3 bg-slate-50 p-1.5 pl-3 rounded-2xl border border-slate-100">
                 <div className="text-right hidden sm:block">
                   <p className="text-[10px] font-bold text-slate-700 leading-none">{user.name}</p>
-                  <p className="text-[9px] text-slate-400 font-medium">{user.email}</p>
+                  <span className="text-xs font-bold text-slate-600">{user.email.split('@')[0]}</span>
                 </div>
                 <button
                   onClick={handleLogout}
@@ -468,9 +604,55 @@ export default function App() {
               </section>
 
               <section className="bg-white p-8 rounded-[2.5rem] border border-slate-200 shadow-sm space-y-6">
-                <h2 className="text-xs font-bold text-slate-400 uppercase tracking-widest flex items-center gap-2">
-                  <MessageSquare size={16} /> 2. AI Context (Optional)
-                </h2>
+                <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 mb-6">
+                  <h2 className="text-xs font-bold text-slate-400 uppercase tracking-widest flex items-center gap-2">
+                    <MessageSquare size={16} /> 2. AI Context (Optional)
+                  </h2>
+                  <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto">
+                    <div className="flex flex-1 sm:flex-initial items-center gap-1.5 bg-slate-50 p-1 rounded-xl border border-slate-100 min-w-[140px]">
+                      <Users size={12} className="text-slate-400 ml-1.5" />
+                      <select
+                        value={selectedCustomerId}
+                        onChange={(e) => {
+                          setSelectedCustomerId(e.target.value);
+                          setSelectedPresetId('');
+                        }}
+                        className="bg-transparent text-[11px] font-bold text-slate-600 outline-none w-full"
+                      >
+                        <option value="">顧客を選択</option>
+                        {customers.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+                      </select>
+                    </div>
+                    <div className="flex flex-1 sm:flex-initial items-center gap-1.5 bg-slate-50 p-1 rounded-xl border border-slate-100 min-w-[140px]">
+                      <LayoutDashboard size={12} className="text-slate-400 ml-1.5" />
+                      <select
+                        value={selectedPresetId}
+                        onChange={(e) => {
+                          const pid = e.target.value;
+                          setSelectedPresetId(pid);
+                          const p = presets.find(pr => pr.id === pid);
+                          if (p) {
+                            setAiContext({ goal: p.goal, issues: p.issues, tasks: p.tasks });
+                          }
+                        }}
+                        className="bg-transparent text-[11px] font-bold text-slate-600 outline-none w-full"
+                        disabled={!selectedCustomerId}
+                      >
+                        <option value="">プリセットを選択</option>
+                        {presets.filter(p => p.customer_id === selectedCustomerId).map(p => (
+                          <option key={p.id} value={p.id}>{p.name}</option>
+                        ))}
+                      </select>
+                    </div>
+                    <button
+                      onClick={() => setShowPresetsModal(true)}
+                      className="p-2.5 bg-indigo-50 text-indigo-600 hover:bg-indigo-100 rounded-xl border border-indigo-100 transition-all flex items-center gap-2 text-[10px] font-bold h-[34px]"
+                      title="顧客・プリセット管理"
+                    >
+                      <Building size={14} /> <span>管理</span>
+                    </button>
+                  </div>
+                </div>
                 <div className="grid grid-cols-1 gap-4">
                   <div className="space-y-2">
                     <label className="text-[10px] font-bold text-slate-400 uppercase flex items-center gap-2">
@@ -679,9 +861,192 @@ export default function App() {
         )}
       </div>
 
+      {/* Preset Management Modal */}
+      {showPresetsModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-in fade-in duration-200">
+          <div className="bg-white rounded-[2.5rem] shadow-2xl border border-slate-200 max-w-4xl w-full h-[80vh] overflow-hidden flex flex-col animate-in zoom-in-95 duration-200 relative">
+            <div className="p-6 border-b border-slate-100 flex items-center justify-between bg-slate-50/50">
+              <h3 className="text-lg font-black text-slate-800 flex items-center gap-2">
+                <Building size={20} className="text-indigo-600" /> 顧客・プリセット管理
+              </h3>
+              <button
+                onClick={() => { setShowPresetsModal(false); setEditingCustomer(null); setEditingPreset(null); }}
+                className="p-2 text-slate-400 hover:text-slate-600 transition-colors"
+                id="close-presets-modal"
+              >
+                <X size={20} />
+              </button>
+            </div>
+
+            <div className="flex-1 overflow-hidden flex flex-col md:flex-row">
+              {/* Sidebar: Customer List */}
+              <div className="w-full md:w-64 border-r border-slate-100 flex flex-col bg-slate-50/30">
+                <div className="p-4 border-b border-slate-100 flex items-center justify-between">
+                  <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">顧客リスト</span>
+                  <button
+                    onClick={() => { setEditingCustomer({ id: null, name: '' }); }}
+                    className="p-1.5 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition-all shadow-sm"
+                  >
+                    <Plus size={14} />
+                  </button>
+                </div>
+                <div className="flex-1 overflow-y-auto p-2 space-y-1 custom-scrollbar">
+                  {customers.map(c => (
+                    <div
+                      key={c.id}
+                      onClick={() => { setManagementCustomer(c.id); setEditingPreset(null); }}
+                      className={`group flex items-center justify-between p-3 rounded-xl cursor-pointer transition-all ${managementCustomer === c.id ? 'bg-white border border-indigo-100 shadow-sm' : 'hover:bg-white/50 border border-transparent'}`}
+                    >
+                      <span className={`text-sm font-bold ${managementCustomer === c.id ? 'text-indigo-600' : 'text-slate-600'}`}>
+                        {c.name}
+                      </span>
+                      <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                        <button
+                          onClick={(e) => { e.stopPropagation(); handleDeleteCustomer(c.id); }}
+                          className="p-1 text-slate-400 hover:text-rose-600"
+                        >
+                          <Trash2 size={12} />
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                  {editingCustomer && editingCustomer.id === null && (
+                    <div className="p-2 animate-in slide-in-from-left-2">
+                       <input
+                        autoFocus
+                        placeholder="顧客名を入力..."
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') handleSaveCustomer(e.target.value);
+                          if (e.key === 'Escape') setEditingCustomer(null);
+                        }}
+                        onBlur={(e) => handleSaveCustomer(e.target.value)}
+                        className="w-full p-2 text-xs border border-indigo-200 rounded-lg outline-none ring-2 ring-indigo-50"
+                       />
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* Main Area: Preset List & Editor */}
+              <div className="flex-1 flex flex-col bg-white overflow-hidden">
+                {!managementCustomer ? (
+                  <div className="flex-1 flex flex-col items-center justify-center text-slate-300 space-y-4">
+                    <Users size={64} opacity={0.2} />
+                    <p className="font-bold text-sm">左側のリストから顧客を選択してください</p>
+                  </div>
+                ) : (
+                  <>
+                    <div className="p-4 border-b border-slate-100 bg-slate-50/50 flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <input
+                          value={customers.find(c => c.id === managementCustomer)?.name || ''}
+                          onChange={(e) => {
+                            const newName = e.target.value;
+                            setCustomers(customers.map(c => c.id === managementCustomer ? { ...c, name: newName } : c));
+                          }}
+                          className="text-sm font-bold bg-white border border-transparent hover:border-indigo-100 focus:border-indigo-300 focus:bg-white px-2 py-1 rounded-lg outline-none transition-all w-48"
+                          placeholder="顧客名を入力"
+                        />
+                        <span className="text-[10px] text-slate-400 font-medium">のプリセット</span>
+                      </div>
+                      <button
+                        onClick={() => setEditingPreset({ id: null, name: '新規プリセット', goal: '', issues: '', tasks: '' })}
+                        className="px-4 py-1.5 bg-indigo-600 text-white rounded-xl hover:bg-indigo-700 transition-all flex items-center gap-2 text-xs font-bold"
+                      >
+                        <Plus size={14} /> 新規作成
+                      </button>
+                    </div>
+
+                    <div className="flex-1 overflow-hidden flex">
+                      {/* Sub-sidebar: Preset List for Customer */}
+                      <div className="w-48 border-r border-slate-100 overflow-y-auto p-2 space-y-1 custom-scrollbar bg-slate-50/20">
+                        {presets.filter(p => p.customer_id === managementCustomer).map(p => (
+                          <div
+                            key={p.id}
+                            onClick={() => setEditingPreset(p)}
+                            className={`group p-3 rounded-xl cursor-pointer border transition-all ${editingPreset?.id === p.id ? 'bg-white border-indigo-200 shadow-sm' : 'border-transparent hover:bg-white/50'}`}
+                          >
+                            <div className="flex items-center justify-between">
+                              <span className={`text-[11px] font-bold truncate pr-2 ${editingPreset?.id === p.id ? 'text-indigo-600' : 'text-slate-500'}`}>
+                                {p.name}
+                              </span>
+                              <button
+                                onClick={(e) => { e.stopPropagation(); handleDeletePreset(p.id); }}
+                                className="opacity-0 group-hover:opacity-100 p-1 text-slate-300 hover:text-rose-500 transition-opacity"
+                              >
+                                <Trash2 size={10} />
+                              </button>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+
+                      {/* Detail Editor */}
+                      <div className="flex-1 flex flex-col bg-white overflow-hidden">
+                        {editingPreset ? (
+                          <>
+                            <div className="flex-1 overflow-y-auto p-6 space-y-6 custom-scrollbar animate-in fade-in duration-200">
+                              <div className="space-y-2">
+                                <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">プリセット名</label>
+                                <input
+                                  value={editingPreset.name}
+                                  onChange={(e) => setEditingPreset({ ...editingPreset, name: e.target.value })}
+                                  className="w-full p-3 bg-slate-50 border border-slate-100 rounded-xl text-sm font-bold focus:ring-2 focus:ring-indigo-500 outline-none"
+                                />
+                              </div>
+                              <div className="space-y-2">
+                                <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">目標</label>
+                                <textarea
+                                  value={editingPreset.goal}
+                                  onChange={(e) => setEditingPreset({ ...editingPreset, goal: e.target.value })}
+                                  className="w-full p-4 bg-slate-50 border border-slate-100 rounded-2xl text-sm focus:ring-2 focus:ring-indigo-500 outline-none min-h-[80px]"
+                                />
+                              </div>
+                              <div className="space-y-2">
+                                <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">課題</label>
+                                <textarea
+                                  value={editingPreset.issues}
+                                  onChange={(e) => setEditingPreset({ ...editingPreset, issues: e.target.value })}
+                                  className="w-full p-4 bg-slate-50 border border-slate-100 rounded-2xl text-sm focus:ring-2 focus:ring-indigo-500 outline-none min-h-[100px]"
+                                />
+                              </div>
+                              <div className="space-y-2">
+                                <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">タスク</label>
+                                <textarea
+                                  value={editingPreset.tasks}
+                                  onChange={(e) => setEditingPreset({ ...editingPreset, tasks: e.target.value })}
+                                  className="w-full p-4 bg-slate-50 border border-slate-100 rounded-2xl text-sm focus:ring-2 focus:ring-indigo-500 outline-none min-h-[100px]"
+                                />
+                              </div>
+                            </div>
+                            <div className="p-4 border-t border-slate-100 bg-slate-50/50 flex justify-end">
+                              <button
+                                onClick={() => handleSavePreset(editingPreset)}
+                                className="px-8 py-3 bg-indigo-600 text-white font-bold rounded-2xl text-sm hover:bg-indigo-700 transition-all flex items-center gap-2 shadow-lg shadow-indigo-100"
+                              >
+                                <Save size={18} /> 設定を保存
+                              </button>
+                            </div>
+                          </>
+                        ) : (
+                          <div className="h-full flex flex-col items-center justify-center text-slate-300 space-y-4 opacity-50">
+                            <LayoutDashboard size={48} />
+                            <p className="text-xs font-bold">プリセットを選択または新規作成してください</p>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Error Modal */}
       {showModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-in fade-in duration-200">
+        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-in fade-in duration-200">
           <div className="bg-white rounded-[2.5rem] shadow-2xl border border-slate-200 max-w-md w-full overflow-hidden animate-in zoom-in-95 duration-200">
             <div className="p-8 text-center space-y-6">
               <div className="w-20 h-20 bg-rose-50 rounded-3xl flex items-center justify-center mx-auto text-rose-500">
@@ -709,6 +1074,60 @@ export default function App() {
           </div>
         </div>
       )}
+
+      {/* Confirmation Modal */}
+      {confirmModal.show && (
+        <div className="fixed inset-0 z-[70] flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-in fade-in duration-200">
+          <div className="bg-white rounded-[2.5rem] shadow-2xl border border-slate-200 max-w-sm w-full overflow-hidden animate-in zoom-in-95 duration-200">
+            <div className="p-8 text-center space-y-6">
+              <div className="w-16 h-16 bg-amber-50 rounded-3xl flex items-center justify-center mx-auto text-amber-500">
+                <AlertCircle size={32} />
+              </div>
+              <div className="space-y-2">
+                <h3 className="text-lg font-black text-slate-800">{confirmModal.title}</h3>
+                <p className="text-xs text-slate-500 leading-relaxed">
+                  {confirmModal.message}
+                </p>
+              </div>
+              <div className="grid grid-cols-2 gap-3 pt-2">
+                <button
+                  onClick={() => setConfirmModal({ ...confirmModal, show: false })}
+                  className="py-3 bg-slate-100 text-slate-600 font-bold rounded-xl hover:bg-slate-200 transition-all active:scale-95"
+                >
+                  キャンセル
+                </button>
+                <button
+                  onClick={() => {
+                    if (confirmModal.onConfirm) confirmModal.onConfirm();
+                    setConfirmModal({ ...confirmModal, show: false });
+                  }}
+                  className="py-3 bg-rose-500 text-white font-bold rounded-xl hover:bg-rose-600 transition-all active:scale-95 shadow-lg shadow-rose-100"
+                >
+                  削除する
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <div className="fixed bottom-6 right-6 z-[100] pointer-events-none">
+        {status && (
+          <div className={`pointer-events-auto p-4 rounded-2xl shadow-2xl border flex items-center gap-3 animate-in slide-in-from-right-10 duration-300 ${status.type === 'error' ? 'bg-white border-rose-100' : 'bg-slate-900 border-slate-800'}`}>
+            {status.type === 'error' ? (
+              <AlertCircle size={20} className="text-rose-500" />
+            ) : (
+              <CheckCircle2 size={20} className="text-indigo-400" />
+            )}
+            <p className={`text-sm font-bold ${status.type === 'error' ? 'text-slate-800' : 'text-white'}`}>
+              {status.message}
+            </p>
+            <button onClick={() => setStatus(null)} className="ml-2 text-slate-400 hover:text-white transition-colors">
+              <X size={14} />
+            </button>
+          </div>
+        )}
+      </div>
 
       <style dangerouslySetInnerHTML={{ __html: `
         .custom-scrollbar::-webkit-scrollbar { width: 4px; height: 4px; }
