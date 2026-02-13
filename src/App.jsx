@@ -26,9 +26,11 @@ import {
   Users,
   Plus,
   Trash2,
-  Save
+  Save,
+  GripVertical
 } from 'lucide-react';
 import { GoogleLogin, googleLogout } from '@react-oauth/google';
+import { DragDropContext, Droppable, Draggable } from '@hello-pangea/dnd';
 import { jwtDecode } from 'jwt-decode';
 import { supabase } from './lib/supabase';
 
@@ -42,7 +44,7 @@ export default function App() {
   const [extractionLog, setExtractionLog] = useState([]);
   const [generating, setGenerating] = useState(false);
   const [aiResponse, setAiResponse] = useState('');
-  const [status, setStatus] = useState({ type: '', message: '' });
+  const [status, setStatus] = useState(null);
   const [activeSheet, setActiveSheet] = useState('');
   const [isLibLoaded, setIsLibLoaded] = useState(false);
 
@@ -114,17 +116,74 @@ export default function App() {
   const fetchData = useCallback(async () => {
     if (!import.meta.env.VITE_SUPABASE_URL || import.meta.env.VITE_SUPABASE_URL === 'your-project-url.supabase.co') return;
     try {
-      const { data: cData, error: cError } = await supabase.from('customers').select('*').order('created_at', { ascending: true });
+      const { data: cData, error: cError } = await supabase.from('customers').select('*').order('sort_order', { ascending: true });
       if (cError) throw cError;
       setCustomers(cData || []);
 
-      const { data: pData, error: pError } = await supabase.from('presets').select('*').order('created_at', { ascending: true });
+      const { data: pData, error: pError } = await supabase.from('presets').select('*').order('sort_order', { ascending: true });
       if (pError) throw pError;
       setPresets(pData || []);
     } catch (e) {
       console.error('Supabase fetch error:', e);
     }
   }, []);
+
+  const handleOnDragEndCustomers = async (result) => {
+    if (!result.destination) return;
+    const items = Array.from(customers);
+    const [reorderedItem] = items.splice(result.source.index, 1);
+    items.splice(result.destination.index, 0, reorderedItem);
+
+    // Update locally for immediate feedback
+    setCustomers(items);
+
+    try {
+      const updates = items.map((item, index) => {
+        const newOrder = index * 10;
+        return supabase.from('customers').update({ sort_order: newOrder }).eq('id', item.id);
+      });
+      await Promise.all(updates);
+    } catch (e) {
+      console.error('Customer reorder failed:', e);
+      setStatus({ type: 'error', message: '並び替えの保存に失敗しました' });
+      fetchData(); // Revert
+    }
+  };
+
+  const handleOnDragEndPresets = async (result) => {
+    if (!result.destination) return;
+
+    const filteredPresets = presets.filter(p => p.customer_id === managementCustomer);
+    const otherPresets = presets.filter(p => p.customer_id !== managementCustomer);
+
+    const items = Array.from(filteredPresets);
+    const [reorderedItem] = items.splice(result.source.index, 1);
+    items.splice(result.destination.index, 0, reorderedItem);
+
+    // Update locally
+    const reorderedFiltered = items.map((item, index) => ({ ...item, sort_order: index * 10 }));
+    setPresets([...otherPresets, ...reorderedFiltered].sort((a, b) => (a.sort_order || 0) - (b.sort_order || 0)));
+
+    try {
+      const updates = reorderedFiltered.map(item =>
+        supabase.from('presets').update({ sort_order: item.sort_order }).eq('id', item.id)
+      );
+      await Promise.all(updates);
+    } catch (e) {
+      console.error('Preset reorder failed:', e);
+      setStatus({ type: 'error', message: '並び替えの保存に失敗しました' });
+      fetchData(); // Revert
+    }
+  };
+
+  const handleOnDragEnd = (result) => {
+    if (!result.destination) return;
+    if (result.source.droppableId === 'customers') {
+      handleOnDragEndCustomers(result);
+    } else if (result.source.droppableId === 'presets') {
+      handleOnDragEndPresets(result);
+    }
+  };
 
   useEffect(() => {
     fetchData();
@@ -202,7 +261,6 @@ export default function App() {
     setApiKey(key);
     localStorage.setItem(`gemini_api_key_${appId}`, key);
     setStatus({ type: 'success', message: 'APIキーを保存しました' });
-    setStatus({ type: 'success', message: 'APIキーを保存しました' });
   };
 
   const formatNumericString = (val) => {
@@ -230,10 +288,11 @@ export default function App() {
     return label;
   };
 
-  // Auto-hide success status
+  // Auto-hide status messages
   useEffect(() => {
-    if (status && status.type === 'success') {
-      const timer = setTimeout(() => setStatus(null), 3000);
+    if (status) {
+      const duration = status.type === 'error' ? 8000 : 3000;
+      const timer = setTimeout(() => setStatus(null), duration);
       return () => clearTimeout(timer);
     }
   }, [status]);
@@ -262,10 +321,12 @@ export default function App() {
         const { error } = await supabase.from('customers').update({ name }).eq('id', targetId);
         if (error) throw error;
       } else {
-        const { error } = await supabase.from('customers').insert([{ name }]);
+        const minOrder = customers.length > 0 ? Math.min(...customers.map(c => c.sort_order || 0)) : 0;
+        const { error } = await supabase.from('customers').insert([{ name, sort_order: minOrder - 10 }]);
         if (error) throw error;
       }
       fetchData();
+      setStatus({ type: 'success', message: '顧客を保存しました' });
     } catch (e) {
       console.error('Customer save error:', e);
       setStatus({ type: 'error', message: '顧客の保存に失敗しました' });
@@ -299,21 +360,24 @@ export default function App() {
   const handleSavePreset = async (presetData) => {
     if (!presetData.name.trim() || !managementCustomer || !user) return;
     try {
-      if (editingPreset && editingPreset.id) {
+      if (presetData.id) {
         const { error } = await supabase.from('presets').update({
           name: presetData.name,
           goal: presetData.goal,
           issues: presetData.issues,
           tasks: presetData.tasks
-        }).eq('id', editingPreset.id);
+        }).eq('id', presetData.id);
         if (error) throw error;
       } else {
+        const customerPresets = presets.filter(p => p.customer_id === managementCustomer);
+        const minOrder = customerPresets.length > 0 ? Math.min(...customerPresets.map(p => p.sort_order || 0)) : 0;
         const { error } = await supabase.from('presets').insert([{
           customer_id: managementCustomer,
           name: presetData.name,
           goal: presetData.goal,
           issues: presetData.issues,
-          tasks: presetData.tasks
+          tasks: presetData.tasks,
+          sort_order: minOrder - 10
         }]);
         if (error) throw error;
       }
@@ -322,6 +386,31 @@ export default function App() {
     } catch (e) {
       console.error('Preset save error:', e);
       setStatus({ type: 'error', message: 'プリセットの保存に失敗しました' });
+    }
+  };
+
+  const handleDuplicatePreset = async (preset) => {
+    if (!user || !managementCustomer) return;
+    try {
+      const customerPresets = presets.filter(p => p.customer_id === managementCustomer);
+      const minOrder = customerPresets.length > 0 ? Math.min(...customerPresets.map(p => p.sort_order || 0)) : 0;
+
+      const { data, error } = await supabase.from('presets').insert([{
+        customer_id: managementCustomer,
+        name: `${preset.name} (コピー)`,
+        goal: preset.goal,
+        issues: preset.issues,
+        tasks: preset.tasks,
+        sort_order: minOrder - 10
+      }]).select();
+
+      if (error) throw error;
+      fetchData();
+      if (data && data[0]) setEditingPreset(data[0]);
+      setStatus({ type: 'success', message: 'プリセットを複製しました' });
+    } catch (e) {
+      console.error('Duplicate preset error:', e);
+      setStatus({ type: 'error', message: 'プリセットの複製に失敗しました' });
     }
   };
 
@@ -891,198 +980,246 @@ export default function App() {
       {/* Preset Management Modal */}
       {showPresetsModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-in fade-in duration-200">
-          <div className="bg-white rounded-[2.5rem] shadow-2xl border border-slate-200 max-w-4xl w-full h-[80vh] overflow-hidden flex flex-col animate-in zoom-in-95 duration-200 relative">
-            <div className="p-6 border-b border-slate-100 flex items-center justify-between bg-slate-50/50">
-              <h3 className="text-lg font-black text-slate-800 flex items-center gap-2">
-                <Building size={20} className="text-indigo-600" /> 顧客・プリセット管理
-              </h3>
-              <button
-                onClick={() => { setShowPresetsModal(false); setEditingCustomer(null); setEditingPreset(null); }}
-                className="p-2 text-slate-400 hover:text-slate-600 transition-colors"
-                id="close-presets-modal"
-              >
-                <X size={20} />
-              </button>
-            </div>
-
-            <div className="flex-1 overflow-hidden flex flex-col md:flex-row">
-              {/* Sidebar: Customer List */}
-              <div className="w-full md:w-64 border-r border-slate-100 flex flex-col bg-slate-50/30">
-                <div className="p-4 border-b border-slate-100 flex items-center justify-between">
-                  <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">顧客リスト</span>
-                  <button
-                    onClick={() => { setEditingCustomer({ id: null, name: '' }); }}
-                    className="p-1.5 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition-all shadow-sm"
-                  >
-                    <Plus size={14} />
-                  </button>
-                </div>
-                <div className="flex-1 overflow-y-auto p-2 space-y-1 custom-scrollbar">
-                  {customers.map(c => (
-                    <div
-                      key={c.id}
-                      onClick={() => { setManagementCustomer(c.id); setEditingPreset(null); }}
-                      className={`group flex items-center justify-between p-3 rounded-xl cursor-pointer transition-all ${managementCustomer === c.id ? 'bg-white border border-indigo-100 shadow-sm' : 'hover:bg-white/50 border border-transparent'}`}
-                    >
-                      <span className={`text-sm font-bold ${managementCustomer === c.id ? 'text-indigo-600' : 'text-slate-600'}`}>
-                        {c.name}
-                      </span>
-                      <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                        <button
-                          onClick={(e) => { e.stopPropagation(); handleDeleteCustomer(c.id); }}
-                          className="p-1 text-slate-400 hover:text-rose-600"
-                        >
-                          <Trash2 size={12} />
-                        </button>
-                      </div>
-                    </div>
-                  ))}
-                  {editingCustomer && editingCustomer.id === null && (
-                    <div className="p-2 animate-in slide-in-from-left-2">
-                       <input
-                        autoFocus
-                        placeholder="顧客名を入力..."
-                        onKeyDown={(e) => {
-                          if (e.nativeEvent.isComposing) return;
-                          if (e.key === 'Enter') {
-                            e.preventDefault();
-                            handleSaveCustomer(e.target.value);
-                          }
-                          if (e.key === 'Escape') setEditingCustomer(null);
-                        }}
-                        onBlur={(e) => {
-                          if (editingCustomer) handleSaveCustomer(e.target.value);
-                        }}
-                        className="w-full p-2 text-xs border border-indigo-200 rounded-lg outline-none ring-2 ring-indigo-50"
-                       />
-                    </div>
-                  )}
-                </div>
+          <DragDropContext onDragEnd={handleOnDragEnd}>
+            <div className="bg-white rounded-[2.5rem] shadow-2xl border border-slate-200 max-w-6xl w-full h-[85vh] overflow-hidden flex flex-col animate-in zoom-in-95 duration-200 relative">
+              <div className="p-6 border-b border-slate-100 flex items-center justify-between bg-slate-50/50">
+                <h3 className="text-lg font-black text-slate-800 flex items-center gap-2">
+                  <Building size={20} className="text-indigo-600" /> 顧客・プリセット管理
+                </h3>
+                <button
+                  onClick={() => { setShowPresetsModal(false); setEditingCustomer(null); setEditingPreset(null); }}
+                  className="p-2 text-slate-400 hover:text-slate-600 transition-colors"
+                  id="close-presets-modal"
+                >
+                  <X size={20} />
+                </button>
               </div>
 
-              {/* Main Area: Preset List & Editor */}
-              <div className="flex-1 flex flex-col bg-white overflow-hidden">
-                {!managementCustomer ? (
-                  <div className="flex-1 flex flex-col items-center justify-center text-slate-300 space-y-4">
-                    <Users size={64} opacity={0.2} />
-                    <p className="font-bold text-sm">左側のリストから顧客を選択してください</p>
+              <div className="flex-1 overflow-hidden flex flex-col md:flex-row">
+                {/* Sidebar: Customer List */}
+                <div className="w-full md:w-64 border-r border-slate-100 flex flex-col bg-slate-50/30">
+                  <div className="p-4 border-b border-slate-100 flex items-center justify-between">
+                    <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">顧客リスト</span>
+                    <button
+                      onClick={() => { setEditingCustomer({ id: null, name: '' }); }}
+                      className="p-1.5 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition-all shadow-sm"
+                    >
+                      <Plus size={14} />
+                    </button>
                   </div>
-                ) : (
-                  <>
-                    <div className="p-4 border-b border-slate-100 bg-slate-50/50 flex items-center justify-between">
-                      <div className="flex items-center gap-2">
-                        <input
-                          value={customers.find(c => c.id === managementCustomer)?.name || ''}
-                          onChange={(e) => {
-                            const newName = e.target.value;
-                            setCustomers(customers.map(c => c.id === managementCustomer ? { ...c, name: newName } : c));
-                          }}
-                          onBlur={(e) => handleSaveCustomer(e.target.value, managementCustomer)}
-                          onKeyDown={(e) => {
-                            if (e.nativeEvent.isComposing) return;
-                            if (e.key === 'Enter') {
-                              e.preventDefault();
-                              handleSaveCustomer(e.target.value, managementCustomer);
-                              e.target.blur();
-                            }
-                          }}
-                          className="text-sm font-bold bg-white border border-transparent hover:border-indigo-100 focus:border-indigo-300 focus:bg-white px-2 py-1 rounded-lg outline-none transition-all w-48"
-                          placeholder="顧客名を入力"
-                        />
-                        <span className="text-[10px] text-slate-400 font-medium">のプリセット</span>
-                      </div>
-                      <button
-                        onClick={() => setEditingPreset({ id: null, name: '新規プリセット', goal: '', issues: '', tasks: '' })}
-                        className="px-4 py-1.5 bg-indigo-600 text-white rounded-xl hover:bg-indigo-700 transition-all flex items-center gap-2 text-xs font-bold"
+                  <Droppable droppableId="customers">
+                    {(provided) => (
+                      <div
+                        {...provided.droppableProps}
+                        ref={provided.innerRef}
+                        className="flex-1 overflow-y-auto p-2 space-y-1 custom-scrollbar"
                       >
-                        <Plus size={14} /> 新規作成
-                      </button>
-                    </div>
-
-                    <div className="flex-1 overflow-hidden flex">
-                      {/* Sub-sidebar: Preset List for Customer */}
-                      <div className="w-48 border-r border-slate-100 overflow-y-auto p-2 space-y-1 custom-scrollbar bg-slate-50/20">
-                        {presets.filter(p => p.customer_id === managementCustomer).map(p => (
-                          <div
-                            key={p.id}
-                            onClick={() => setEditingPreset(p)}
-                            className={`group p-3 rounded-xl cursor-pointer border transition-all ${editingPreset?.id === p.id ? 'bg-white border-indigo-200 shadow-sm' : 'border-transparent hover:bg-white/50'}`}
-                          >
-                            <div className="flex items-center justify-between">
-                              <span className={`text-[11px] font-bold truncate pr-2 ${editingPreset?.id === p.id ? 'text-indigo-600' : 'text-slate-500'}`}>
-                                {p.name}
-                              </span>
-                              <button
-                                onClick={(e) => { e.stopPropagation(); handleDeletePreset(p.id); }}
-                                className="opacity-0 group-hover:opacity-100 p-1 text-slate-300 hover:text-rose-500 transition-opacity"
+                        {customers.map((c, index) => (
+                          <Draggable key={c.id} draggableId={c.id} index={index}>
+                            {(provided) => (
+                              <div
+                                ref={provided.innerRef}
+                                {...provided.draggableProps}
+                                onClick={() => { setManagementCustomer(c.id); setEditingPreset(null); }}
+                                className={`group flex items-center gap-2 p-3 rounded-xl cursor-pointer transition-all ${managementCustomer === c.id ? 'bg-white border border-indigo-100 shadow-sm' : 'hover:bg-white/50 border border-transparent'}`}
                               >
-                                <Trash2 size={10} />
-                              </button>
-                            </div>
-                          </div>
+                                <div {...provided.dragHandleProps} className="text-slate-300 hover:text-slate-500 transition-colors">
+                                  <GripVertical size={14} />
+                                </div>
+                                <span className={`text-sm font-bold flex-1 ${managementCustomer === c.id ? 'text-indigo-600' : 'text-slate-600'}`}>
+                                  {c.name}
+                                </span>
+                                <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                                  <button
+                                    onClick={(e) => { e.stopPropagation(); handleDeleteCustomer(c.id); }}
+                                    className="p-1 text-slate-400 hover:text-rose-600"
+                                  >
+                                    <Trash2 size={12} />
+                                  </button>
+                                </div>
+                              </div>
+                            )}
+                          </Draggable>
                         ))}
-                      </div>
-
-                      {/* Detail Editor */}
-                      <div className="flex-1 flex flex-col bg-white overflow-hidden">
-                        {editingPreset ? (
-                          <>
-                            <div className="flex-1 overflow-y-auto p-6 space-y-6 custom-scrollbar animate-in fade-in duration-200">
-                              <div className="space-y-2">
-                                <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">プリセット名</label>
-                                <input
-                                  value={editingPreset.name}
-                                  onChange={(e) => setEditingPreset({ ...editingPreset, name: e.target.value })}
-                                  className="w-full p-3 bg-slate-50 border border-slate-100 rounded-xl text-sm font-bold focus:ring-2 focus:ring-indigo-500 outline-none"
-                                />
-                              </div>
-                              <div className="space-y-2">
-                                <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">目標</label>
-                                <textarea
-                                  value={editingPreset.goal}
-                                  onChange={(e) => setEditingPreset({ ...editingPreset, goal: e.target.value })}
-                                  className="w-full p-4 bg-slate-50 border border-slate-100 rounded-2xl text-sm focus:ring-2 focus:ring-indigo-500 outline-none min-h-[80px]"
-                                />
-                              </div>
-                              <div className="space-y-2">
-                                <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">課題</label>
-                                <textarea
-                                  value={editingPreset.issues}
-                                  onChange={(e) => setEditingPreset({ ...editingPreset, issues: e.target.value })}
-                                  className="w-full p-4 bg-slate-50 border border-slate-100 rounded-2xl text-sm focus:ring-2 focus:ring-indigo-500 outline-none min-h-[100px]"
-                                />
-                              </div>
-                              <div className="space-y-2">
-                                <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">タスク</label>
-                                <textarea
-                                  value={editingPreset.tasks}
-                                  onChange={(e) => setEditingPreset({ ...editingPreset, tasks: e.target.value })}
-                                  className="w-full p-4 bg-slate-50 border border-slate-100 rounded-2xl text-sm focus:ring-2 focus:ring-indigo-500 outline-none min-h-[100px]"
-                                />
-                              </div>
-                            </div>
-                            <div className="p-4 border-t border-slate-100 bg-slate-50/50 flex justify-end">
-                              <button
-                                onClick={() => handleSavePreset(editingPreset)}
-                                className="px-8 py-3 bg-indigo-600 text-white font-bold rounded-2xl text-sm hover:bg-indigo-700 transition-all flex items-center gap-2 shadow-lg shadow-indigo-100"
-                              >
-                                <Save size={18} /> 設定を保存
-                              </button>
-                            </div>
-                          </>
-                        ) : (
-                          <div className="h-full flex flex-col items-center justify-center text-slate-300 space-y-4 opacity-50">
-                            <LayoutDashboard size={48} />
-                            <p className="text-xs font-bold">プリセットを選択または新規作成してください</p>
+                        {provided.placeholder}
+                        {editingCustomer && editingCustomer.id === null && (
+                          <div className="p-2 animate-in slide-in-from-left-2">
+                            <input
+                              autoFocus
+                              placeholder="顧客名を入力..."
+                              onKeyDown={(e) => {
+                                if (e.nativeEvent.isComposing) return;
+                                if (e.key === 'Enter') {
+                                  e.preventDefault();
+                                  handleSaveCustomer(e.target.value);
+                                }
+                                if (e.key === 'Escape') setEditingCustomer(null);
+                              }}
+                              onBlur={(e) => {
+                                if (editingCustomer) handleSaveCustomer(e.target.value);
+                              }}
+                              className="w-full text-sm font-bold bg-white border border-indigo-200 px-3 py-2 rounded-xl outline-none shadow-sm shadow-indigo-50"
+                            />
                           </div>
                         )}
                       </div>
+                    )}
+                  </Droppable>
+                </div>
+
+                {/* Main Area: Preset List & Editor */}
+                <div className="flex-1 flex flex-col bg-white overflow-hidden">
+                  {!managementCustomer ? (
+                    <div className="flex-1 flex flex-col items-center justify-center text-slate-300 space-y-4">
+                      <Users size={64} opacity={0.2} />
+                      <p className="font-bold text-sm">左側のリストから顧客を選択してください</p>
                     </div>
-                  </>
-                )}
+                  ) : (
+                    <>
+                      <div className="p-4 border-b border-slate-100 bg-slate-50/50 flex items-center justify-between">
+                        <div className="flex items-center gap-2">
+                          <input
+                            value={customers.find(c => c.id === managementCustomer)?.name || ''}
+                            onChange={(e) => {
+                              const newName = e.target.value;
+                              setCustomers(customers.map(c => c.id === managementCustomer ? { ...c, name: newName } : c));
+                            }}
+                            onBlur={(e) => handleSaveCustomer(e.target.value, managementCustomer)}
+                            onKeyDown={(e) => {
+                              if (e.nativeEvent.isComposing) return;
+                              if (e.key === 'Enter') {
+                                e.preventDefault();
+                                handleSaveCustomer(e.target.value, managementCustomer);
+                                e.target.blur();
+                              }
+                            }}
+                            className="text-sm font-bold bg-white border border-transparent hover:border-indigo-100 focus:border-indigo-300 focus:bg-white px-2 py-1 rounded-lg outline-none transition-all w-48"
+                            placeholder="顧客名を入力"
+                          />
+                          <span className="text-[10px] text-slate-400 font-medium">のプリセット</span>
+                        </div>
+                        <button
+                          onClick={() => setEditingPreset({ id: null, name: '新規プリセット', goal: '', issues: '', tasks: '' })}
+                          className="px-4 py-1.5 bg-indigo-600 text-white rounded-xl hover:bg-indigo-700 transition-all flex items-center gap-2 text-xs font-bold"
+                        >
+                          <Plus size={14} /> 新規作成
+                        </button>
+                      </div>
+
+                      <div className="flex-1 overflow-hidden flex">
+                        {/* Sub-sidebar: Preset List for Customer */}
+                        <Droppable droppableId="presets">
+                          {(provided) => (
+                            <div
+                              {...provided.droppableProps}
+                              ref={provided.innerRef}
+                              className="w-64 border-r border-slate-100 overflow-y-auto p-2 space-y-1 custom-scrollbar bg-slate-50/20"
+                            >
+                              {presets.filter(p => p.customer_id === managementCustomer).map((p, index) => (
+                                <Draggable key={p.id} draggableId={p.id} index={index}>
+                                  {(provided) => (
+                                    <div
+                                      ref={provided.innerRef}
+                                      {...provided.draggableProps}
+                                      onClick={() => setEditingPreset(p)}
+                                      className={`group p-3 rounded-xl cursor-pointer border transition-all ${editingPreset?.id === p.id ? 'bg-white border-indigo-200 shadow-sm' : 'border-transparent hover:bg-white/50'}`}
+                                    >
+                                      <div className="flex items-center gap-2">
+                                        <div {...provided.dragHandleProps} className="text-slate-200 hover:text-slate-400">
+                                          <GripVertical size={12} />
+                                        </div>
+                                        <div className="flex-1 flex items-center justify-between min-w-0">
+                                          <span className={`text-[11px] font-bold truncate pr-2 ${editingPreset?.id === p.id ? 'text-indigo-600' : 'text-slate-500'}`}>
+                                            {p.name}
+                                          </span>
+                                          <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
+                                            <button
+                                              onClick={(e) => { e.stopPropagation(); handleDuplicatePreset(p); }}
+                                              className="p-1 text-slate-300 hover:text-indigo-500 transition-colors"
+                                              title="複製"
+                                            >
+                                              <Copy size={10} />
+                                            </button>
+                                            <button
+                                              onClick={(e) => { e.stopPropagation(); handleDeletePreset(p.id); }}
+                                              className="p-1 text-slate-300 hover:text-rose-500 transition-opacity"
+                                              title="削除"
+                                            >
+                                              <Trash2 size={10} />
+                                            </button>
+                                          </div>
+                                        </div>
+                                      </div>
+                                    </div>
+                                  )}
+                                </Draggable>
+                              ))}
+                              {provided.placeholder}
+                            </div>
+                          )}
+                        </Droppable>
+
+                        {/* Detail Editor */}
+                        <div className="flex-1 flex flex-col bg-white overflow-hidden">
+                          {editingPreset ? (
+                            <>
+                              <div className="flex-1 overflow-y-auto p-6 space-y-6 custom-scrollbar animate-in fade-in duration-200">
+                                <div className="space-y-2">
+                                  <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">プリセット名</label>
+                                  <input
+                                    value={editingPreset.name}
+                                    onChange={(e) => setEditingPreset({ ...editingPreset, name: e.target.value })}
+                                    className="w-full p-3 bg-slate-50 border border-slate-100 rounded-xl text-sm font-bold focus:ring-2 focus:ring-indigo-500 outline-none"
+                                  />
+                                </div>
+                                <div className="space-y-2">
+                                  <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">目標</label>
+                                  <textarea
+                                    value={editingPreset.goal}
+                                    onChange={(e) => setEditingPreset({ ...editingPreset, goal: e.target.value })}
+                                    className="w-full p-4 bg-slate-50 border border-slate-100 rounded-2xl text-sm focus:ring-2 focus:ring-indigo-500 outline-none min-h-[80px]"
+                                  />
+                                </div>
+                                <div className="space-y-2">
+                                  <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">課題</label>
+                                  <textarea
+                                    value={editingPreset.issues}
+                                    onChange={(e) => setEditingPreset({ ...editingPreset, issues: e.target.value })}
+                                    className="w-full p-4 bg-slate-50 border border-slate-100 rounded-2xl text-sm focus:ring-2 focus:ring-indigo-500 outline-none min-h-[100px]"
+                                  />
+                                </div>
+                                <div className="space-y-2">
+                                  <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">タスク</label>
+                                  <textarea
+                                    value={editingPreset.tasks}
+                                    onChange={(e) => setEditingPreset({ ...editingPreset, tasks: e.target.value })}
+                                    className="w-full p-4 bg-slate-50 border border-slate-100 rounded-2xl text-sm focus:ring-2 focus:ring-indigo-500 outline-none min-h-[100px]"
+                                  />
+                                </div>
+                              </div>
+                              <div className="p-4 border-t border-slate-100 bg-slate-50/50 flex justify-end">
+                                <button
+                                  onClick={() => handleSavePreset(editingPreset)}
+                                  className="px-8 py-3 bg-indigo-600 text-white font-bold rounded-2xl text-sm hover:bg-indigo-700 transition-all flex items-center gap-2 shadow-lg shadow-indigo-100"
+                                >
+                                  <Save size={18} /> 設定を保存
+                                </button>
+                              </div>
+                            </>
+                          ) : (
+                            <div className="h-full flex flex-col items-center justify-center text-slate-300 space-y-4 opacity-50">
+                              <LayoutDashboard size={48} />
+                              <p className="text-xs font-bold">プリセットを選択または新規作成してください</p>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    </>
+                  )}
+                </div>
               </div>
             </div>
-          </div>
+          </DragDropContext>
         </div>
       )}
 
