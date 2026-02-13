@@ -1,4 +1,4 @@
-exports.handler = async (event, context) => {
+export const handler = async (event, context) => {
   // Only allow POST
   if (event.httpMethod !== "POST") {
     return { statusCode: 405, body: "Method Not Allowed" };
@@ -28,8 +28,9 @@ exports.handler = async (event, context) => {
     }
 
     // Return the API Key from environment variables
-    const apiKey = process.env.GEMINI_API_KEY;
+    const apiKey = process.env.GEMINI_API_KEY || process.env.VITE_GEMINI_API_KEY;
     if (!apiKey) {
+      console.error("Missing GEMINI_API_KEY in environment");
       return {
         statusCode: 500,
         body: JSON.stringify({ error: "API Key not configured on server." })

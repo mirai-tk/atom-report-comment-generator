@@ -97,11 +97,22 @@ export default function App() {
       if (envKey) setApiKey(envKey);
     }
 
-    return () => { if (document.head.contains(script)) document.head.removeChild(script); };
+    // Track Supabase Auth State
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
+      console.log('Supabase Auth Event:', event, session?.user?.email);
+      if (event === 'SIGNED_IN' || event === 'INITIAL_SESSION') {
+        fetchData();
+      }
+    });
+
+    return () => {
+      if (document.head.contains(script)) document.head.removeChild(script);
+      subscription.unsubscribe();
+    };
   }, []);
 
   const fetchData = useCallback(async () => {
-    if (!user || !import.meta.env.VITE_SUPABASE_URL || import.meta.env.VITE_SUPABASE_URL === 'your-project-url.supabase.co') return;
+    if (!import.meta.env.VITE_SUPABASE_URL || import.meta.env.VITE_SUPABASE_URL === 'your-project-url.supabase.co') return;
     try {
       const { data: cData, error: cError } = await supabase.from('customers').select('*').order('created_at', { ascending: true });
       if (cError) throw cError;
@@ -113,7 +124,7 @@ export default function App() {
     } catch (e) {
       console.error('Supabase fetch error:', e);
     }
-  }, [user]);
+  }, []);
 
   useEffect(() => {
     fetchData();
@@ -135,13 +146,22 @@ export default function App() {
 
       // Sign into Supabase with the same Google Token
       try {
-        await supabase.auth.signInWithIdToken({
+        const { data, error } = await supabase.auth.signInWithIdToken({
           provider: 'google',
           token: credentialResponse.credential,
         });
+        if (error) {
+          if (error.message.includes('not enabled')) {
+            throw new Error('Supabase側のGoogle認証プロバイダーが有効になっていないか、設定が不完全です（Client Secretが空など）。');
+          }
+          throw error;
+        }
+        console.log('Supabase Auth successful:', data.user?.email);
+        fetchData(); // Fetch immediately after successful auth link
       } catch (e) {
-        console.warn('Supabase Auth link failed:', e);
-        // We continue anyway, RLS will fail if not properly configured on DB side
+        console.error('Supabase Auth link failed:', e);
+        setStatus({ type: 'error', message: `データベース認証に失敗しました: ${e.message}` });
+        return; // Stop here if DB auth fails
       }
 
       // Fetch API Key from Netlify function
@@ -151,7 +171,12 @@ export default function App() {
         body: JSON.stringify({ idToken: credentialResponse.credential }),
       });
 
-      if (!response.ok) throw new Error('APIキーの取得に失敗しました');
+      if (!response.ok) {
+        if (response.status === 404) {
+          throw new Error('Netlify Functionが見つかりません。ローカル開発時は「netlify dev」コマンドを使用してください。');
+        }
+        throw new Error('APIキーの取得に失敗しました');
+      }
 
       const { apiKey } = await response.json();
       setApiKey(apiKey);
@@ -162,8 +187,9 @@ export default function App() {
     }
   };
 
-  const handleLogout = () => {
+  const handleLogout = async () => {
     googleLogout();
+    await supabase.auth.signOut();
     setUser(null);
     setApiKey('');
     localStorage.removeItem(`user_${appId}`);
@@ -176,7 +202,7 @@ export default function App() {
     setApiKey(key);
     localStorage.setItem(`gemini_api_key_${appId}`, key);
     setStatus({ type: 'success', message: 'APIキーを保存しました' });
-    setTimeout(() => setStatus({ type: '', message: '' }), 3000);
+    setStatus({ type: 'success', message: 'APIキーを保存しました' });
   };
 
   const formatNumericString = (val) => {
@@ -223,17 +249,22 @@ export default function App() {
     if (fileInputRef.current) fileInputRef.current.value = "";
   };
 
-  const handleSaveCustomer = async (name) => {
+  const handleSaveCustomer = async (name, id = null) => {
+    const targetId = id || (editingCustomer ? editingCustomer.id : null);
+
+    // Always clear editing state if we're not explicitly editing in the header
+    if (!id) setEditingCustomer(null);
+
     if (!name.trim() || !user) return;
+
     try {
-      if (editingCustomer && editingCustomer.id !== null) {
-        const { error } = await supabase.from('customers').update({ name }).eq('id', editingCustomer.id);
+      if (targetId !== null) {
+        const { error } = await supabase.from('customers').update({ name }).eq('id', targetId);
         if (error) throw error;
       } else {
         const { error } = await supabase.from('customers').insert([{ name }]);
         if (error) throw error;
       }
-      setEditingCustomer(null);
       fetchData();
     } catch (e) {
       console.error('Customer save error:', e);
@@ -524,7 +555,7 @@ export default function App() {
               <GoogleLogin
                 onSuccess={handleLoginSuccess}
                 onError={() => setStatus({ type: 'error', message: 'ログインに失敗しました' })}
-                useOneTap
+                use_fedcm_for_prompt={false}
               />
             )}
           </div>
@@ -561,22 +592,18 @@ export default function App() {
         )}
 
         {!user ? (
-          <section className="bg-white p-12 rounded-[2.5rem] border border-slate-200 shadow-sm text-center space-y-6">
-            <div className="w-20 h-20 bg-indigo-50 rounded-3xl flex items-center justify-center mx-auto text-indigo-600 mb-4">
-              <User size={40} />
-            </div>
-            <h2 className="text-2xl font-black text-slate-800">Welcome to Ad Intelligence</h2>
-            <p className="text-slate-500 max-w-sm mx-auto text-sm leading-relaxed">
-              本ツールは mi-rai.co.jp メンバー専用です。<br />
-              Googleアカウントでログインすると、解析とAIサマリー生成が利用可能になります。
-            </p>
-            <div className="flex justify-center pt-4">
-              <GoogleLogin
-                onSuccess={handleLoginSuccess}
-                onError={() => setStatus({ type: 'error', message: 'ログインに失敗しました' })}
-              />
-            </div>
-          </section>
+          <div className="flex-1 flex flex-col items-center justify-center p-6 gap-6">
+            <section className="bg-white p-12 rounded-[2.5rem] border border-slate-200 shadow-sm text-center space-y-6 max-w-lg w-full">
+              <div className="w-20 h-20 bg-indigo-50 rounded-3xl flex items-center justify-center mx-auto text-indigo-600 mb-4">
+                <User size={40} />
+              </div>
+              <h2 className="text-2xl font-black text-slate-800">Welcome to Ad Intelligence</h2>
+              <p className="text-slate-500 text-sm leading-relaxed">
+                本ツールは mi-rai.co.jp メンバー専用です。<br />
+                右上のボタンからGoogleアカウントでログインしてください。
+              </p>
+            </section>
+          </div>
         ) : (
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 animate-in fade-in slide-in-from-bottom-2">
             {/* Main Controls */}
@@ -916,10 +943,16 @@ export default function App() {
                         autoFocus
                         placeholder="顧客名を入力..."
                         onKeyDown={(e) => {
-                          if (e.key === 'Enter') handleSaveCustomer(e.target.value);
+                          if (e.nativeEvent.isComposing) return;
+                          if (e.key === 'Enter') {
+                            e.preventDefault();
+                            handleSaveCustomer(e.target.value);
+                          }
                           if (e.key === 'Escape') setEditingCustomer(null);
                         }}
-                        onBlur={(e) => handleSaveCustomer(e.target.value)}
+                        onBlur={(e) => {
+                          if (editingCustomer) handleSaveCustomer(e.target.value);
+                        }}
                         className="w-full p-2 text-xs border border-indigo-200 rounded-lg outline-none ring-2 ring-indigo-50"
                        />
                     </div>
@@ -943,6 +976,15 @@ export default function App() {
                           onChange={(e) => {
                             const newName = e.target.value;
                             setCustomers(customers.map(c => c.id === managementCustomer ? { ...c, name: newName } : c));
+                          }}
+                          onBlur={(e) => handleSaveCustomer(e.target.value, managementCustomer)}
+                          onKeyDown={(e) => {
+                            if (e.nativeEvent.isComposing) return;
+                            if (e.key === 'Enter') {
+                              e.preventDefault();
+                              handleSaveCustomer(e.target.value, managementCustomer);
+                              e.target.blur();
+                            }
                           }}
                           className="text-sm font-bold bg-white border border-transparent hover:border-indigo-100 focus:border-indigo-300 focus:bg-white px-2 py-1 rounded-lg outline-none transition-all w-48"
                           placeholder="顧客名を入力"
