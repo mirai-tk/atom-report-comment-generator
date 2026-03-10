@@ -36,6 +36,16 @@ import { supabase } from './lib/supabase';
 
 const appId = typeof __app_id !== 'undefined' ? __app_id : 'excel-ai-reporter';
 
+const isAuthError = (e) => {
+  if (!e) return false;
+  const status = e.status || e.statusCode;
+  if (status === 401 || status === 403) return true;
+  const msg = (e.message || '').toLowerCase();
+  const code = (e.code || '').toLowerCase();
+  return msg.includes('jwt expired') || msg.includes('invalid jwt') || msg.includes('invalid token') ||
+    msg.includes('not authenticated') || code === 'pgrst301' || msg.includes('session expired');
+};
+
 export default function App() {
   const [file, setFile] = useState(null);
   const [workbook, setWorkbook] = useState(null);
@@ -104,12 +114,28 @@ export default function App() {
       console.log('Supabase Auth Event:', event, session?.user?.email);
       if (event === 'SIGNED_IN' || event === 'INITIAL_SESSION') {
         fetchData();
+      } else if (event === 'SIGNED_OUT') {
+        setUser(null);
+        localStorage.removeItem(`user_${appId}`);
+        setStatus({ type: 'error', message: 'セッションが期限切れです。再ログインしてください。' });
       }
     });
+
+    const handleVisibilityChange = async () => {
+      if (document.visibilityState !== 'visible') return;
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session && localStorage.getItem(`user_${appId}`)) {
+        setUser(null);
+        localStorage.removeItem(`user_${appId}`);
+        setStatus({ type: 'error', message: 'セッションが期限切れです。再ログインしてください。' });
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibilityChange);
 
     return () => {
       if (document.head.contains(script)) document.head.removeChild(script);
       subscription.unsubscribe();
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
     };
   }, []);
 
@@ -125,6 +151,11 @@ export default function App() {
       setPresets(pData || []);
     } catch (e) {
       console.error('Supabase fetch error:', e);
+      if (isAuthError(e)) {
+        setUser(null);
+        localStorage.removeItem(`user_${appId}`);
+        setStatus({ type: 'error', message: 'セッションが期限切れです。再ログインしてください。' });
+      }
     }
   }, []);
 
@@ -145,8 +176,14 @@ export default function App() {
       await Promise.all(updates);
     } catch (e) {
       console.error('Customer reorder failed:', e);
-      setStatus({ type: 'error', message: '並び替えの保存に失敗しました' });
-      fetchData(); // Revert
+      if (isAuthError(e)) {
+        setUser(null);
+        localStorage.removeItem(`user_${appId}`);
+        setStatus({ type: 'error', message: 'セッションが期限切れです。再ログインしてください。' });
+      } else {
+        setStatus({ type: 'error', message: '並び替えの保存に失敗しました' });
+        fetchData(); // Revert
+      }
     }
   };
 
@@ -171,8 +208,14 @@ export default function App() {
       await Promise.all(updates);
     } catch (e) {
       console.error('Preset reorder failed:', e);
-      setStatus({ type: 'error', message: '並び替えの保存に失敗しました' });
-      fetchData(); // Revert
+      if (isAuthError(e)) {
+        setUser(null);
+        localStorage.removeItem(`user_${appId}`);
+        setStatus({ type: 'error', message: 'セッションが期限切れです。再ログインしてください。' });
+      } else {
+        setStatus({ type: 'error', message: '並び替えの保存に失敗しました' });
+        fetchData(); // Revert
+      }
     }
   };
 
@@ -240,6 +283,7 @@ export default function App() {
       const { apiKey } = await response.json();
       setApiKey(apiKey);
       sessionStorage.setItem(`apiKey_${appId}`, apiKey);
+      localStorage.setItem(`gemini_api_key_${appId}`, apiKey);
       setStatus({ type: 'success', message: 'APIキーを自動設定しました' });
     } catch (err) {
       setStatus({ type: 'error', message: err.message });
@@ -329,7 +373,13 @@ export default function App() {
       setStatus({ type: 'success', message: '顧客を保存しました' });
     } catch (e) {
       console.error('Customer save error:', e);
-      setStatus({ type: 'error', message: '顧客の保存に失敗しました' });
+      if (isAuthError(e)) {
+        setUser(null);
+        localStorage.removeItem(`user_${appId}`);
+        setStatus({ type: 'error', message: 'セッションが期限切れです。再ログインしてください。' });
+      } else {
+        setStatus({ type: 'error', message: '顧客の保存に失敗しました' });
+      }
     }
   };
 
@@ -351,7 +401,13 @@ export default function App() {
           setStatus({ type: 'success', message: '顧客を削除しました' });
         } catch (e) {
           console.error('Customer delete error:', e);
-          setStatus({ type: 'error', message: '顧客の削除に失敗しました' });
+          if (isAuthError(e)) {
+            setUser(null);
+            localStorage.removeItem(`user_${appId}`);
+            setStatus({ type: 'error', message: 'セッションが期限切れです。再ログインしてください。' });
+          } else {
+            setStatus({ type: 'error', message: '顧客の削除に失敗しました' });
+          }
         }
       }
     });
@@ -385,7 +441,13 @@ export default function App() {
       setStatus({ type: 'success', message: 'プリセットを保存しました' });
     } catch (e) {
       console.error('Preset save error:', e);
-      setStatus({ type: 'error', message: 'プリセットの保存に失敗しました' });
+      if (isAuthError(e)) {
+        setUser(null);
+        localStorage.removeItem(`user_${appId}`);
+        setStatus({ type: 'error', message: 'セッションが期限切れです。再ログインしてください。' });
+      } else {
+        setStatus({ type: 'error', message: 'プリセットの保存に失敗しました' });
+      }
     }
   };
 
@@ -410,7 +472,13 @@ export default function App() {
       setStatus({ type: 'success', message: 'プリセットを複製しました' });
     } catch (e) {
       console.error('Duplicate preset error:', e);
-      setStatus({ type: 'error', message: 'プリセットの複製に失敗しました' });
+      if (isAuthError(e)) {
+        setUser(null);
+        localStorage.removeItem(`user_${appId}`);
+        setStatus({ type: 'error', message: 'セッションが期限切れです。再ログインしてください。' });
+      } else {
+        setStatus({ type: 'error', message: 'プリセットの複製に失敗しました' });
+      }
     }
   };
 
@@ -428,7 +496,13 @@ export default function App() {
           setStatus({ type: 'success', message: 'プリセットを削除しました' });
         } catch (e) {
           console.error('Preset delete error:', e);
-          setStatus({ type: 'error', message: 'プリセットの削除に失敗しました' });
+          if (isAuthError(e)) {
+            setUser(null);
+            localStorage.removeItem(`user_${appId}`);
+            setStatus({ type: 'error', message: 'セッションが期限切れです。再ログインしてください。' });
+          } else {
+            setStatus({ type: 'error', message: 'プリセットの削除に失敗しました' });
+          }
         }
       }
     });
