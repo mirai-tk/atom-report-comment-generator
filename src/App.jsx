@@ -549,9 +549,12 @@ export default function App() {
       // Data Extraction logic
       const logs = [];
       const fetchVal = (sh, ad, lb) => {
-        let v = getCellValue(wb, sh, ad);
-        if (v && v !== "0" && v !== "0%") {
-          logs.push(`[Success] ${lb}: ${ad} (${v})`);
+        const targetName = wb.SheetNames.find(n => n.trim().includes(sh)) || sh;
+        const sheet = wb.Sheets[targetName];
+        const rawCell = sheet?.[ad];
+        if (rawCell) {
+          const v = getCellValue(wb, sh, ad);
+          logs.push(`[Success] ${lb}: ${ad} (${v === '' ? '空' : v})`);
           return v;
         }
         const f = findValueByLabel(wb, sh, lb);
@@ -581,20 +584,9 @@ export default function App() {
 
       setExtractionLog(logs);
 
-      // Check if essential data is missing (unsaved file detection)
-      const essentials = [extracted.achievement, extracted.totalCV, extracted.cpa];
-      const missingCount = essentials.filter(v => !v || v === "0" || v === "0%").length;
-
-      if (missingCount >= 2) {
-        setExtractedData(null); // Clear data to prevent generation
-        setModalTitle('データの読み取り失敗');
-        setModalMessage('エクセルファイルから数値を読み取ることができませんでした。システムからダウンロードした直後のファイルは計算結果が保持されていない場合があります。一度「上書き保存」してから、再度ファイルを選択してください。');
-        setShowModal(true);
-        setStatus({ type: 'error', message: '解析エラー' });
-      } else {
-        setExtractedData(extracted);
-        setStatus({ type: 'success', message: '解析完了' });
-      }
+      // 0・空はレポートによって正常なので、数値の有無で解析エラーにしない
+      setExtractedData(extracted);
+      setStatus({ type: 'success', message: '解析完了' });
     } catch (err) {
       console.error(err);
       setStatus({ type: 'error', message: 'ファイル読み込み失敗' });
